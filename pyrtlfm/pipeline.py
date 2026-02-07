@@ -1,9 +1,9 @@
 # %%
 """Wire capture -> squelch -> demod -> user callback."""
 
+import logging
 import threading
 import time
-import pickle
 from pathlib import Path
 from typing import NamedTuple
 
@@ -14,47 +14,28 @@ from scipy.signal import butter, filtfilt
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpl_patches
 
-from . import squelch
+import fit_sinusoid
+import decode
+import packets
+from importlib import reload
+
+reload(decode)
+reload(fit_sinusoid)
+reload(packets)
+
+logger = logging.getLogger(__name__)
 
 
-class DemodPacket(NamedTuple):
-    timestamp: float
-    iq_gated: np.ndarray
-
-
-def phase_velocity(packet: DemodPacket) -> np.ndarray:
-    product = packet.iq_gated[1:] * np.conj(packet.iq_gated[:-1])
-    return np.angle(product) / np.pi
-
-
-def amplitude(packet: DemodPacket) -> np.ndarray:
-    return np.abs(packet.iq_gated[:-1])
-
-
-def fsk_filtered(
-    packet: DemodPacket,
+def smoothed_phase_velocity(
+    iq: np.ndarray,
     cutoff_hz: float = 50_000,
     sample_rate: float = 2.4e6,
     order: int = 5,
 ) -> np.ndarray:
-    """FSK decode with low-pass filtering."""
     return filtfilt(
         *butter(order, cutoff_hz / (sample_rate / 2), btype="low"),
-        x=phase_velocity(packet),
+        x=packets.phase_velocity(iq),
     )
-
-
-def save_packets(packets: list[DemodPacket], path: str | Path) -> None:
-    """Save DemodPackets to a pickle file."""
-    with open(path, "wb") as f:
-        pickle.dump(packets, f)
-    print(f"Saved {len(packets)} packets to {path}")
-
-
-def load_packets(path: str | Path) -> list[DemodPacket]:
-    """Load DemodPackets from a pickle file."""
-    with open(path, "rb") as f:
-        return pickle.load(f)
 
 
 def _ensure_complex_ndarray(samples) -> np.ndarray:
@@ -65,24 +46,24 @@ def _ensure_complex_ndarray(samples) -> np.ndarray:
     return arr
 
 
-def run_decoder_loop() -> list[DemodPacket]:
+def run_decoder_loop() -> list[packets.DemodPacket]:
     """Run the pipeline at 915 MHz, 2.4 Msps.
 
     Press Ctrl+C to stop.
     """
-    packets: list[DemodPacket] = []
+    packets_list: list[packets.DemodPacket] = []
 
     def packet_callback(samples, ctx) -> None:
         iq = _ensure_complex_ndarray(samples)
         if iq.size < 2:
             return
 
-        squelch_open, iq_gated = squelch.squelch(iq, 0.6, zero_when_closed=True)
+        squelch_open, iq_gated = packets.squelch(iq, 0.6, zero_when_closed=True)
         if not squelch_open:
             return
 
         timestamp = time.time()
-        packets.append(DemodPacket(timestamp, iq_gated))
+        packets_list.append(packets.DemodPacket(timestamp, iq_gated))
         print("Packet received", timestamp)
 
     def run(sdr: RtlSdr) -> None:
@@ -109,16 +90,16 @@ def run_decoder_loop() -> list[DemodPacket]:
         sdr.cancel_read_async()
         thread.join(timeout=5.0)
     print("Stopped.")
-    return packets
+    return packets_list
 
 
 # audio = run_decoder_loop()
-# save_packets(audio, "capture.pkl")
+# packets.save_packets(audio, "capture.pkl")
 
 
 # %%
 def plot_audio_samples(
-    samples: list[DemodPacket],
+    samples: list[packets.DemodPacket],
     figsize_per_plot: tuple[float, float] = (12, 3),
 ) -> None:
     """Plot DemodPacket samples in an n×3 grid: amplitude ts, phase ts, phase hist."""
@@ -137,8 +118,8 @@ def plot_audio_samples(
         offset_s = sample.timestamp - t0
 
         # Use DemodPacket helpers
-        phase_arr = phase_velocity(sample)
-        amplitude_arr = amplitude(sample)
+        phase_arr = packets.phase_velocity(sample.iq_gated)
+        amplitude_arr = packets.amplitude(sample.iq_gated)
 
         i_high_amplitude = np.nonzero(amplitude_arr > 0.5 * amplitude_arr.max())[0][
             10:-10
@@ -165,52 +146,61 @@ def plot_audio_samples(
     plt.show()
 
 
-if __name__ == "__main__":
-    plt.close("all")
-    audio = load_packets("capture.pkl")
-    plot_audio_samples(audio)
+plt.close("all")
+audio = packets.load_packets("capture.pkl")
+plot_audio_samples(audio)
 
 
 # %%
 
-#%%
-class Digitized:
-    def __init__(self, packet: DemodPacket, num_samples_in_preamble: int = 1000):
-        self.phase_velocity = phase_velocity(packet)
-        self.fsk = fsk_filtered(packet)
-        self.pll = PhaseLockedLoop(self.phase_velocity)
 
-
-def show_sample(
-    sample: DemodPacket,
+def decode_packet(
+    sample: packets.DemodPacket,
     range: tuple[int, int] = (),
-    figsize: tuple[float, float] = (12, 12),
+    show_plot: bool = True,
+    num_samples_in_preamble: int = 1200,
+    trim_sample: int = 40,
 ) -> None:
     """Plot a single DemodPacket in a 3×1 grid: amplitude, amplitude (DC removed), high-amp phase."""
-    amplitude_arr = amplitude(sample)
-
-    # Time steps where the amplitude is high
-    i_amplitude_high = np.nonzero(amplitude_arr > 0.5 * amplitude_arr.max())[0]
-    i_amplitude_high = i_amplitude_high[10:-10]
+    # Find time steps where the amplitude is high
+    amplitude_arr = packets.amplitude(sample.iq_gated)
 
     if range == ():
+        i_amplitude_high = np.nonzero(amplitude_arr > 0.5 * amplitude_arr.max())[0]
+        i_amplitude_high = i_amplitude_high[trim_sample:-trim_sample]
+
         range = (i_amplitude_high[0], i_amplitude_high[-1])
 
-    iq_slice = sample.iq_gated[range[0] : range[1]]
+        # Ensure there is exactly one contiguous region of high amplitude. If there is more than one, we need to
+        # combine packets. That functionality isn't implemented yet.
+        if range[0] <= 100 or np.any(np.diff(i_amplitude_high) > 1):
+            logger.warning(
+                "Multiple contiguous regions of high amplitude found. This packet can't be digidized."
+            )
+            return
 
-    # Ensure there is exactly one contiguous region of high amplitude. If there is more than one, we need to
-    # combine packets. That functionality isn't implemented yet.
-    if np.any(np.diff(i_amplitude_high) > 1):
-        print(
-            "Warning: Multiple contiguous regions of high amplitude found. This packet can't be digidized."
+    iq = sample.iq_gated[range[0] : range[1]]
+
+    phase_vel = packets.phase_velocity(iq)
+    preamble_params = fit_sinusoid.fit_sinusoid(phase_vel[:num_samples_in_preamble])
+    print(
+        "  bit_width: %.1f samples, range duration: %d samples (%.2f ms)"
+        % (
+            0.5 / preamble_params.frequency,
+            range[1] - range[0],
+            ((range[1] - range[0]) / 2.4e6 * 1e3),
         )
-    else:
-        digidized = Digitized(DemodPacket(sample.timestamp, iq_slice))
-        phase_velocity = digidized.phase_velocity
-        fsk_arr = digidized.fsk
-        fsk_bits = fsk_arr > np.median(fsk_arr)
+    )
 
-    _, axes = plt.subplots(3, 1, figsize=figsize, sharex=False)
+    binarized = fit_sinusoid.binarize(phase_vel, preamble_params)
+    data_bits = decode.trim_preamble(binarized.bits)
+    hex_str = decode.bits_to_hex(data_bits)
+    print(hex_str)
+
+    if not show_plot:
+        return
+
+    _, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=False)
 
     # The entire amplitude time series, with the high amplitude region highlighted
     axes[0].plot(amplitude_arr)
@@ -230,33 +220,84 @@ def show_sample(
 
     # The I and Q components, and magnitude.
     x = np.arange(range[0], range[1])
-    axes[1].plot(x, iq_slice.real, label="I", color="blue", lw=0.5)
-    axes[1].plot(x, iq_slice.imag, label="Q", color="orange", lw=0.5)
-    axes[1].plot(x, np.abs(iq_slice), label="Magnitude", color="green", lw=2)
+    axes[1].plot(x, iq.real, label="I", color="blue", lw=0.5)
+    axes[1].plot(x, iq.imag, label="Q", color="orange", lw=0.5)
+    axes[1].plot(x, np.abs(iq), label="Magnitude", color="green", lw=2)
     axes[1].set_ylabel("I / Q / Magnitude")
     axes[1].set_title(f"I & Q samples, high region (t={sample.timestamp:.3f}s)")
     axes[1].set_xlabel("Sample index")
     axes[1].legend()
     ax1_twin = axes[1].twinx()
-    (h,) = ax1_twin.plot(x, np.angle(iq_slice), color="red", marker=".")
+    (h,) = ax1_twin.plot(x, np.angle(iq), color="red", marker=".")
     ax1_twin.set_ylabel("Phase (rad)", color=h.get_color())
     ax1_twin.tick_params(axis="y", labelcolor=h.get_color())
 
     # The phase velocity time series, along with its smoothed and thresholded versions.
-    axes[2].plot(x[:-1], phase_velocity)
-    axes[2].plot(x[:-1], fsk_arr, color="red")
+    axes[2].plot(x[:-1], phase_vel, label="Phase velocity")
+    # Overlay the recovered sinusoid from fit_sinusoid (fitted on first 1000 samples)
+    t_fit = np.arange(num_samples_in_preamble)
+    axes[2].plot(
+        x[: len(t_fit)],
+        preamble_params.values(t_fit),
+        color="magenta",
+        lw=0.5,
+        alpha=0.8,
+        label="Preamble sinusoid",
+    )
+    # Mark the end of the preamble with a vertical line
+    n_preamble_bits = max(0, len(binarized.bits) - len(data_bits) - 1)
+    axes[2].axvline(
+        range[0] + binarized.boundaries[n_preamble_bits][1],
+        color="red",
+        linestyle="--",
+        lw=1.5,
+        label="Preamble end",
+    )
+    axes[2].legend()
     axes[2].set_ylabel("Phase velocity")
     axes[2].set_title(
         f"Phase velocity, high-amplitude region (t={sample.timestamp:.3f}s)"
     )
     axes[2].set_xlabel("Sample index")
     ax2_twin = axes[2].twinx()
-    (h,) = ax2_twin.plot(x[:-1], fsk_bits, color="black")
-    ax2_twin.set_ylabel("FSK bits", color=h.get_color())
-    ax2_twin.tick_params(axis="y", labelcolor=h.get_color())
+    for val, (b_start, b_end) in zip(binarized.values, binarized.boundaries):
+        ax2_twin.plot(
+            [range[0] + b_start, range[0] + b_end],
+            [val, val],
+            color="black",
+            lw=2,
+        )
+    # Draw hex nibbles (every 4 bits) at the top of the graph.
+    for i in range(0, len(binarized.bits) - 3, 4):
+        nibble = binarized.bits[i : i + 4].astype(int)
+        hex_val = (nibble[0] << 3) | (nibble[1] << 2) | (nibble[2] << 1) | nibble[3]
+        # Centre the label between the start of the first bit and end of the fourth.
+        x_center = range[0] + (binarized.boundaries[i][0] + binarized.boundaries[i + 3][1]) / 2
+        ax2_twin.text(
+            x_center,
+            1.0,
+            f"{hex_val:X}",
+            transform=ax2_twin.get_xaxis_transform(),
+            ha="center",
+            va="top",
+            fontsize=7,
+            fontfamily="monospace",
+            color="black",
+        )
+    ax2_twin.set_ylabel("FSK bits", color="black")
+    ax2_twin.tick_params(axis="y", labelcolor="black")
 
     plt.tight_layout()
     plt.show()
 
 
-    show_sample(audio[2], ())
+reload(decode)
+decode_packet(audio[25])
+
+
+# %%
+reload(fit_sinusoid)
+for ipacket, packet in enumerate(audio):
+    elapsed = packet.timestamp - audio[0].timestamp
+    print("\n=====", ipacket, "t+%.3fs: " % elapsed)
+    decode_packet(packet, show_plot=False)

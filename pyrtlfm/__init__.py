@@ -1,9 +1,9 @@
 """pyrtlfm: FM demodulator for RTL-SDR with squelch and user callback."""
 
-from . import pipeline
-from . import squelch
+from . import decode
+from . import packets
 
 __all__ = [
-    "pipeline",
-    "squelch",
+    "decode",
+    "packets",
 ]
