@@ -70,19 +70,18 @@ def run_demo():
     plt.show()
 
 
-def run_demo_audio(sample_index: int = 24, num_sample_in_preamble: int = 1000):
+def run_demo_audio(sample_index: int, num_sample_in_preamble: int = 600):
     """Fit a sinusoid to the preamble of audio packet 24 from the capture file."""
     # 1. Load the captured packets and pick packet 24
     sample = packets.load_packets(_HERE / "capture.pkl")[sample_index]
 
     # 2. Extract the high-amplitude region (same logic as decode_packet)
-    amplitude_arr = packets.amplitude(sample.iq_gated)
+    amplitude_arr = sample.amplitude()
     i_high = np.nonzero(amplitude_arr > 0.5 * amplitude_arr.max())[0]
-    i_high = i_high[40:-40]
-    iq = sample.iq_gated[i_high[0] : i_high[-1]]
+    i_high = i_high[2:-2]
 
     # 3. Compute phase velocity and isolate the preamble (first 1000 samples)
-    phase_vel = packets.phase_velocity(iq)
+    phase_vel = sample.phase_velocity()[i_high[0] : i_high[-1]]
     preamble = phase_vel[:num_sample_in_preamble]
 
     # 4. Fit a sinusoid to the preamble
@@ -107,4 +106,4 @@ def run_demo_audio(sample_index: int = 24, num_sample_in_preamble: int = 1000):
 
 
 if __name__ == "__main__":
-    run_demo_audio()
+    run_demo_audio(3)

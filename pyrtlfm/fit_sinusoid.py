@@ -14,16 +14,6 @@ class SinusoidParams(NamedTuple):
             2 * np.pi * self.frequency * (t - self.phase)
         )
 
-    def jacobian(self, t):
-        theta = 2 * np.pi * self.frequency * (t - self.phase)
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        d_frequency = self.amplitude * cos_theta * 2 * np.pi * (t - self.phase)
-        d_phase = self.amplitude * cos_theta * (-2 * np.pi * self.frequency)
-        d_amplitude = sin_theta
-        d_vertical_offset = np.ones_like(t)
-        return np.column_stack([d_frequency, d_phase, d_amplitude, d_vertical_offset])
-
 
 def fit_sinusoid(signal: np.ndarray, num_annealing_passes: int = 10) -> SinusoidParams:
 
@@ -75,15 +65,17 @@ class BinarizeResult(NamedTuple):
 def binarize(x: np.ndarray, params: SinusoidParams) -> BinarizeResult:
     bit_start = params.phase
     bit_width = 0.5 / params.frequency
-    bit_width_int = int(round(bit_width))
-    start = int(round(bit_start))
-    averages = []
-    boundaries = []
-    i = start
-    while i + bit_width_int <= len(x):
-        averages.append(np.mean(x[i : i + bit_width_int]))
-        boundaries.append((i, i + bit_width_int))
-        i += bit_width_int
-    values = np.array(averages)
-    bits = values > params.vertical_offset
-    return BinarizeResult(values, bits, boundaries)
+
+    # Establish boundaries in floating point
+    n_bits = int((len(x) - bit_start) / bit_width)
+    edges = bit_start + np.arange(n_bits + 1) * bit_width
+    int_edges = np.rint(edges).astype(int)
+
+    # Compute means between rounded boundaries
+    averages = np.array(
+        [np.mean(x[int_edges[i] : int_edges[i + 1]]) for i in range(n_bits)]
+    )
+    boundaries = [(int_edges[i], int_edges[i + 1]) for i in range(n_bits)]
+
+    bits = averages > params.vertical_offset
+    return BinarizeResult(averages, bits, boundaries)
