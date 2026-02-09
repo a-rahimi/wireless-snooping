@@ -1,5 +1,4 @@
-"""Pure-data helpers for decoding binarised FSK frames."""
-
+from typing import Sequence
 import numpy as np
 
 
@@ -82,9 +81,9 @@ def find_after(bits: np.ndarray, target: int) -> np.ndarray:
     return np.empty(0, dtype=np.uint8)
 
 
-def uint8_to_hex(data: np.ndarray) -> str:
+def uint8_to_hex(data: Sequence[int]) -> str:
     """Convert a uint8 array to a space-separated hex string.
 
     Each byte is rendered as two lowercase hex digits, e.g. ``"a3 f0 12"``.
     """
-    return " ".join(f"{b:02x}" for b in np.asarray(data, dtype=np.uint8))
+    return " ".join(f"{b:02x}" for b in data)

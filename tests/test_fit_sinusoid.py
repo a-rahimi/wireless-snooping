@@ -19,7 +19,7 @@ def test_fit_sinusoid_recovery():
     np.random.seed(42)
     signal += np.random.normal(0, 0.05, len(t))
 
-    result = fit_sinusoid(signal)
+    result = fit_sinusoid(signal, inlier_threshold=1.0)
 
     assert result.frequency == pytest.approx(true.frequency, abs=1e-3)
     assert result.vertical_offset == pytest.approx(true.vertical_offset, abs=0.1)

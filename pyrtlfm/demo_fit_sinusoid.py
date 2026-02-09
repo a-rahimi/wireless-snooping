@@ -1,40 +1,88 @@
-# %%
-from pathlib import Path
-
+from IPython import display
+import matplotlib.animation
+import matplotlib.lines
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
 import fit_sinusoid
 import packets
 
-from importlib import reload
 
-reload(fit_sinusoid)
+def draw_and_fit_sinusoid(
+    fig,
+    t,
+    noisy_signal,
+    h_curve: matplotlib.lines.Line2D,
+    h_inliners: matplotlib.lines.Line2D,
+    **fit_kwargs,
+) -> fit_sinusoid.SinusoidParams:
+    """Fit sinusoid iteratively, animating the fit on the given axes."""
+    popts = [
+        (
+            fit_sinusoid.SinusoidParams(
+                frequency=0,
+                phase=0,
+                amplitude=0,
+                vertical_offset=noisy_signal.mean(),
+            ),
+            np.ones_like(noisy_signal, bool),
+        )
+    ] + list(fit_sinusoid.fit_sinusoid_iteratively(noisy_signal, **fit_kwargs))
 
-_HERE = Path(__file__).resolve().parent
+    def update(frame: int):
+        params, ingroup = popts[frame]
+        h_curve.set_ydata(params.values(t))
+        h_inliners.set_data(t[ingroup], noisy_signal[ingroup])
+        return (h_curve, h_inliners)
+
+    anim = matplotlib.animation.FuncAnimation(
+        fig, update, frames=len(popts), interval=500, blit=True
+    )
+
+    display.display(display.HTML(anim.to_jshtml()))
+    return popts[-1][0]
 
 
-def run_demo():
+def demo_fit_random_signal():
     # 1. Generate synthetic signal
     true_params = fit_sinusoid.SinusoidParams(
         frequency=0.05,
         phase=5.0,
-        amplitude=2.0,
+        amplitude=1.0,
         vertical_offset=0.5,
     )
 
     # Create time array
-    t = np.arange(100)
+    t = np.arange(300)
 
     # Ground truth signal
     clean_signal = true_params.values(t)
 
     # Add noise
     np.random.seed(42)
-    noisy_signal = clean_signal + np.random.normal(0, 0.1, len(t))
+    noisy_signal = clean_signal + np.random.normal(0, 0.2, len(t))
 
-    # 2. Fit the model
-    popt = fit_sinusoid.fit_sinusoid(noisy_signal)
+    # Plot the true and noisy signals
+    fig, ax = plt.subplots(1, 1, figsize=(8, 3))
+
+    (h_clean,) = ax.plot(t, clean_signal, label="Clean Signal", linewidth=0.5)
+    ax.plot(
+        t, noisy_signal, label="Noisy Signal", color="red", linestyle="none", marker="."
+    )
+    (h_curve,) = ax.plot(t, 0 * t, label="Recovered Signal", linewidth=4, alpha=0.6)
+    (h_inliners,) = ax.plot(
+        t, noisy_signal, label="Inliners", linestyle="none", marker=".", color="green"
+    )
+    ax.set_title("Original vs Noisy Signal")
+    ax.legend()
+    ax.set_ylabel("Amplitude")
+    plt.tight_layout()
+
+    # Fit the model (animates on the same figure)
+    popt = draw_and_fit_sinusoid(
+        fig, t, noisy_signal, h_curve, h_inliners, inlier_threshold=0.3
+    )
 
     # Calculate and print % difference for all parameters using a DataFrame
     rows = []
@@ -52,58 +100,26 @@ def run_demo():
         )
     results_df = pd.DataFrame(rows)
     print(results_df)
-
-    # 3. Reconstruct fitted signal
-    fitted_signal = popt.values(t)
-
-    # 4. Plot results
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-
-    ax.plot(t, clean_signal, label="Clean Signal", linewidth=3)
-    ax.plot(t, noisy_signal, label="Noisy Signal", linestyle="none", marker=".")
-    ax.plot(t, fitted_signal, label="Recovered Signal", linewidth=2, linestyle="--")
-    ax.set_title("Original vs Noisy Signal")
-    ax.legend()
-    ax.set_ylabel("Amplitude")
-
-    plt.tight_layout()
-    plt.show()
+    plt.close(fig)
 
 
-def run_demo_audio(sample_index: int, num_sample_in_preamble: int = 600):
-    """Fit a sinusoid to the preamble of audio packet 24 from the capture file."""
-    # 1. Load the captured packets and pick packet 24
-    sample = packets.load_packets(_HERE / "capture.pkl")[sample_index]
+def demo_fit_radio(frame: packets.DemodPacket, num_sample_in_preamble: int = 600):
+    amplitude = frame.amplitude()
+    i_high = np.nonzero(amplitude > 0.5 * amplitude.max())[0]
+    preamble = frame.phase_velocity()[i_high[0] : i_high[-1]][:num_sample_in_preamble]
 
-    # 2. Extract the high-amplitude region (same logic as decode_packet)
-    amplitude_arr = sample.amplitude()
-    i_high = np.nonzero(amplitude_arr > 0.5 * amplitude_arr.max())[0]
-    i_high = i_high[2:-2]
-
-    # 3. Compute phase velocity and isolate the preamble (first 1000 samples)
-    phase_vel = sample.phase_velocity()[i_high[0] : i_high[-1]]
-    preamble = phase_vel[:num_sample_in_preamble]
-
-    # 4. Fit a sinusoid to the preamble
-    popt = fit_sinusoid.fit_sinusoid(preamble)
-    print("Fitted preamble params:")
-    for name in fit_sinusoid.SinusoidParams._fields:
-        print(f"  {name}: {getattr(popt, name):.6f}")
-
-    # 5. Plot
     t = np.arange(num_sample_in_preamble)
-    fitted_signal = popt.values(t)
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 5))
     ax.plot(t, preamble, label="Preamble (phase velocity)", alpha=0.7)
-    ax.plot(t, fitted_signal, label="Fitted sinusoid", linewidth=2, linestyle="--")
-    ax.set_title(f"Sinusoid fit to preamble of audio[{sample_index}]")
+    (h_curve,) = ax.plot(t, 0 * t, label="Fitted sinusoid", linewidth=2, linestyle="--")
+    (h_inliners,) = ax.plot(
+        t, preamble, label="Inliners", linestyle="none", marker=".", color="green"
+    )
     ax.set_xlabel("Sample index")
     ax.set_ylabel("Phase velocity")
     ax.legend()
     plt.tight_layout()
-    plt.show()
+    draw_and_fit_sinusoid(fig, t, preamble, h_curve, h_inliners)
 
-
-if __name__ == "__main__":
-    run_demo_audio(3)
+    plt.close(fig)

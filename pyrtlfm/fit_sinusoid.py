@@ -1,4 +1,6 @@
-from typing import NamedTuple
+from typing import NamedTuple, Generator
+import collections
+
 import numpy as np
 import scipy.optimize
 
@@ -15,7 +17,9 @@ class SinusoidParams(NamedTuple):
         )
 
 
-def fit_sinusoid(signal: np.ndarray, num_annealing_passes: int = 10) -> SinusoidParams:
+def fit_sinusoid_iteratively(
+    signal: np.ndarray, num_annealing_passes: int = 10, inlier_threshold: float = 0.1
+) -> Generator[tuple[SinusoidParams, np.ndarray], None, None]:
 
     # Initial parameter guesses using FFT-based estimation
     fft_vals = np.fft.fft(signal)
@@ -36,24 +40,33 @@ def fit_sinusoid(signal: np.ndarray, num_annealing_passes: int = 10) -> Sinusoid
 
     t = np.arange(len(signal))
     params = p0
+    yield params, np.ones_like(signal, bool)
 
-    # Fit the sinusoid using nonlinear least squares. Repeat the process a few times,
-    # initially giving more weight to the early samples, until eventually all samples get equal weight.
-    for i in range(num_annealing_passes + 1):
-        popt, _ = scipy.optimize.curve_fit(
-            lambda t, *args: SinusoidParams(*args).values(t),
-            t,
-            signal,
-            p0=params,
-            sigma=(t + 1.0) ** (2 * (-1 + i / num_annealing_passes)),
-            ftol=1e-12,
-            xtol=1e-12,
-            gtol=1e-12,
-            maxfev=50000,
+    # Anneal with a found rounds of nonlinear least squares. In each round, we add more of the sample.
+    # We also find outliers from the previous round and don't include them.
+    for n in np.linspace(len(t) // num_annealing_passes, len(t), num_annealing_passes):
+        n = int(n)
+        inliers = (t < n) & (np.abs(params.values(t) - signal) < inlier_threshold)
+
+        def inlier_residuals(x: np.ndarray) -> np.ndarray:
+            return SinusoidParams(*x).values(t[inliers]) - signal[inliers]
+
+        result = scipy.optimize.least_squares(
+            inlier_residuals,
+            x0=list(params),
+            ftol=1e-8,
+            xtol=1e-8,
+            gtol=1e-8,
+            max_nfev=50000,
         )
-        params = SinusoidParams(*popt)
+        params = SinusoidParams(*result.x)
+        yield params, inliers
 
-    return params
+
+def fit_sinusoid(signal: np.ndarray, **fit_kwargs) -> SinusoidParams:
+    return collections.deque(fit_sinusoid_iteratively(signal, **fit_kwargs), maxlen=1)[
+        0
+    ][0]
 
 
 class BinarizeResult(NamedTuple):
