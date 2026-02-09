@@ -1,8 +1,8 @@
 import os
-import tempfile
 
 from IPython import display
 import matplotlib.animation
+import matplotlib.figure
 import matplotlib.lines
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,11 +13,12 @@ import packets
 
 
 def draw_and_fit_sinusoid(
-    fig,
-    t,
-    noisy_signal,
+    fig: matplotlib.figure.Figure,
+    t: np.ndarray,
+    noisy_signal: np.ndarray,
     h_curve: matplotlib.lines.Line2D,
     h_inliners: matplotlib.lines.Line2D,
+    gif_name: str,
     **fit_kwargs,
 ) -> fit_sinusoid.SinusoidParams:
     """Fit sinusoid iteratively, animating the fit on the given axes."""
@@ -43,25 +44,14 @@ def draw_and_fit_sinusoid(
         fig, update, frames=len(popts), interval=500, blit=True
     )
 
-    # Save as embedded MP4 so the notebook renders on GitHub (no JS/widgets).
-    if not matplotlib.animation.writers.is_available("ffmpeg"):
-        raise FileNotFoundError(
-            "ffmpeg is required to save the animation as MP4. "
-            "Install it (e.g. brew install ffmpeg) and ensure it is on PATH."
-        )
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-        tmp_mp4 = f.name
-    try:
-        anim.save(
-            tmp_mp4,
-            writer="ffmpeg",
-            fps=2,
-            dpi=100,
-            bitrate=2000,
-        )
-        display.display(display.Video(tmp_mp4, embed=True))
-    finally:
-        os.unlink(tmp_mp4)
+    # Save animated GIF to data/ and embed in notebook for Jupyter/nbviewer.
+    os.makedirs("data", exist_ok=True)
+    gif_path = os.path.join("data", gif_name)
+    writer = matplotlib.animation.PillowWriter(fps=2)
+    anim.save(gif_path, writer=writer, dpi=100)
+    with open(gif_path, "rb") as f:
+        gif_data = f.read()
+    display.display(display.Image(data=gif_data, format="gif"))
     return popts[-1][0]
 
 
@@ -102,7 +92,13 @@ def demo_fit_random_signal():
 
     # Fit the model (animates on the same figure)
     popt = draw_and_fit_sinusoid(
-        fig, t, noisy_signal, h_curve, h_inliners, inlier_threshold=0.3
+        fig,
+        t,
+        noisy_signal,
+        h_curve,
+        h_inliners,
+        gif_name="demo_fit_random_signal.gif",
+        inlier_threshold=0.3,
     )
 
     # Calculate and print % difference for all parameters using a DataFrame
@@ -141,6 +137,8 @@ def demo_fit_radio(frame: packets.DemodPacket, num_sample_in_preamble: int = 600
     ax.set_ylabel("Phase velocity")
     ax.legend()
     plt.tight_layout()
-    draw_and_fit_sinusoid(fig, t, preamble, h_curve, h_inliners)
+    draw_and_fit_sinusoid(
+        fig, t, preamble, h_curve, h_inliners, gif_name="demo_fit_radio.gif"
+    )
 
     plt.close(fig)
