@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 from IPython import display
 import matplotlib.animation
 import matplotlib.lines
@@ -40,7 +43,25 @@ def draw_and_fit_sinusoid(
         fig, update, frames=len(popts), interval=500, blit=True
     )
 
-    display.display(display.HTML(anim.to_jshtml()))
+    # Save as embedded MP4 so the notebook renders on GitHub (no JS/widgets).
+    if not matplotlib.animation.writers.is_available("ffmpeg"):
+        raise FileNotFoundError(
+            "ffmpeg is required to save the animation as MP4. "
+            "Install it (e.g. brew install ffmpeg) and ensure it is on PATH."
+        )
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        tmp_mp4 = f.name
+    try:
+        anim.save(
+            tmp_mp4,
+            writer="ffmpeg",
+            fps=2,
+            dpi=100,
+            bitrate=2000,
+        )
+        display.display(display.Video(tmp_mp4, embed=True))
+    finally:
+        os.unlink(tmp_mp4)
     return popts[-1][0]
 
 
